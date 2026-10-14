@@ -1,4 +1,4 @@
-//
+﻿//
 // Authors:
 //   Ben Motmans <ben.motmans@gmail.com>
 //   Lucas Ontivero lucasontivero@gmail.com
@@ -28,11 +28,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Net;
 using System.Diagnostics;
+using System.Net.Http;
 using System.Net.Sockets;
 using System.Threading;
 using System.Xml;
@@ -228,52 +228,49 @@ namespace Open.Nat
 
 			var hostEndPoint = new IPEndPoint(IPAddress.Parse(location.Host), location.Port);
 
-			WebResponse response = null;
 			try
 			{
-#if NET35
-				var request = WebRequest.Create(location);
-#else
-				var request = WebRequest.CreateHttp(location);
-#endif
-				request.Headers.Add("ACCEPT-LANGUAGE", "en");
-				request.Method = "GET";
-
-				response = request.GetResponse();
-
-				var httpresponse = response as HttpWebResponse;
-
-				if (httpresponse != null && httpresponse.StatusCode != HttpStatusCode.OK)
+				using (var request = new HttpRequestMessage(HttpMethod.Get, location))
 				{
-					var message = string.Format("Couldn't get services list: {0} {1}", httpresponse.StatusCode, httpresponse.StatusDescription);
-					throw new Exception(message);
-				}
+					request.Headers.TryAddWithoutValidation("ACCEPT-LANGUAGE", "en");
 
-				var xmldoc = ReadXmlResponse(response);
+					using (HttpResponseMessage response = SoapClient.HttpClient.SendAsync(request).GetAwaiter().GetResult())
+					{
+						if (response.StatusCode != HttpStatusCode.OK)
+						{
+							var message = string.Format("Couldn't get services list: {0} {1}", (int)response.StatusCode, response.ReasonPhrase);
+							throw new Exception(message);
+						}
 
-				NatDiscoverer.TraceSource.LogInfo("{0}: Parsed services list", hostEndPoint);
+						var servicesXml = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+						var xmldoc = new XmlDocument();
+						xmldoc.LoadXml(servicesXml);
 
-				var ns = new XmlNamespaceManager(xmldoc.NameTable);
-				ns.AddNamespace("ns", "urn:schemas-upnp-org:device-1-0");
-				var services = xmldoc.SelectNodes("//ns:service", ns);
+						NatDiscoverer.TraceSource.LogInfo("{0}: Parsed services list", hostEndPoint);
 
-				foreach (XmlNode service in services)
-				{
-					var serviceType = service.GetXmlElementText("serviceType");
-					if (!IsValidControllerService(serviceType)) continue;
+						var ns = new XmlNamespaceManager(xmldoc.NameTable);
+						ns.AddNamespace("ns", "urn:schemas-upnp-org:device-1-0");
+						var services = xmldoc.SelectNodes("//ns:service", ns);
 
-					NatDiscoverer.TraceSource.LogInfo("{0}: Found service: {1}", hostEndPoint, serviceType);
+						foreach (XmlNode service in services)
+						{
+							var serviceType = service.GetXmlElementText("serviceType");
+							if (!IsValidControllerService(serviceType)) continue;
 
-					var serviceControlUrl = service.GetXmlElementText("controlURL");
-					NatDiscoverer.TraceSource.LogInfo("{0}: Found upnp service at: {1}", hostEndPoint, serviceControlUrl);
+							NatDiscoverer.TraceSource.LogInfo("{0}: Found service: {1}", hostEndPoint, serviceType);
 
-					NatDiscoverer.TraceSource.LogInfo("{0}: Handshake Complete", hostEndPoint);
-					return new UpnpNatDeviceInfo(localAddress, location, serviceControlUrl, serviceType);
+							var serviceControlUrl = service.GetXmlElementText("controlURL");
+							NatDiscoverer.TraceSource.LogInfo("{0}: Found upnp service at: {1}", hostEndPoint, serviceControlUrl);
+
+							NatDiscoverer.TraceSource.LogInfo("{0}: Handshake Complete", hostEndPoint);
+							return new UpnpNatDeviceInfo(localAddress, location, serviceControlUrl, serviceType);
+						}
+					}
 				}
 
 				throw new Exception("No valid control service was found in the service descriptor document");
 			}
-			catch (WebException ex)
+			catch (HttpRequestException ex)
 			{
 				// Just drop the connection, FIXME: Should i retry?
 				NatDiscoverer.TraceSource.LogError("{0}: Device denied the connection attempt: {1}", hostEndPoint, ex);
@@ -285,22 +282,6 @@ namespace Open.Nat
 					NatDiscoverer.TraceSource.LogError("Usually this happens. Try resetting the device and try again. If you are in a VPN, disconnect and try again.");
 				}
 				throw;
-			}
-			finally
-			{
-				if (response != null)
-					response.Close();
-			}
-		}
-
-		private static XmlDocument ReadXmlResponse(WebResponse response)
-		{
-			using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
-			{
-				var servicesXml = reader.ReadToEnd();
-				var xmldoc = new XmlDocument();
-				xmldoc.LoadXml(servicesXml);
-				return xmldoc;
 			}
 		}
 	}
